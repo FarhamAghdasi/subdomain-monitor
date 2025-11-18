@@ -1,0 +1,16 @@
+{
+    "name": "subdomain-monitor/app",
+    "description": "سیستم مانیتورینگ خودکار ساب‌دامین‌ها",
+    "type": "project",
+    "require": {
+        "php": ">=7.4"
+    },
+    "autoload": {
+        "psr-4": {
+            "App\\": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}
