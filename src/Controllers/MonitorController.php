@@ -6,13 +6,14 @@ use App\Models\LogModel;
 use App\Models\SubdomainModel;
 use App\Services\HttpClient;
 use App\Services\TelegramNotifier;
+use App\Services\Logger;
 
 class MonitorController
 {
     private $config;
     private $httpClient;
     private $telegram;
-    private $logModel;
+    private $logger;
 
     public function __construct(array $config)
     {
@@ -22,91 +23,86 @@ class MonitorController
             $config['telegram']['bot_token'],
             $config['telegram']['chat_id']
         );
-        $this->logModel = new LogModel($config['paths']['logs']);
+        $this->logger = new Logger($config['paths']['logs']);
     }
 
     public function run(): bool
     {
+        $this->logger->log('Starting subdomain monitoring process');
+        
         try {
-            echo "🚀 شروع مانیتورینگ...\n";
+            // بررسی وجود فایل ساب دامین‌ها
+            $subdomainsFile = $this->config['paths']['subdomains'];
+            if (!file_exists($subdomainsFile)) {
+                $error = "Subdomains file not found: $subdomainsFile";
+                $this->logger->logError($error);
+                $this->telegram->sendError($error);
+                return false;
+            }
+
+            $this->logger->log("Reading subdomains from: $subdomainsFile");
             
-            // خواندن لیست ساب‌دامین‌ها
-            $subdomains = $this->loadSubdomains();
-            
+            $subdomains = file($subdomainsFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
             if (empty($subdomains)) {
-                throw new \Exception('لیست ساب‌دامین‌ها خالی است');
+                $error = "No subdomains found in file";
+                $this->logger->logError($error);
+                return false;
             }
 
-            echo "📝 تعداد ساب‌دامین‌ها: " . count($subdomains) . "\n\n";
+            $this->logger->log("Found " . count($subdomains) . " subdomains to check");
 
-            // بررسی هر ساب‌دامین
-            $processed = 0;
+            $logModel = new LogModel($this->config['paths']['logs']);
+            $checkedCount = 0;
+
             foreach ($subdomains as $subdomain) {
-                $processed++;
-                echo "[$processed/" . count($subdomains) . "] در حال بررسی: $subdomain ... ";
-                
-                $result = $this->httpClient->check($subdomain);
-                $this->logModel->addResult($result);
-                
-                $status = $result->getStatus() ? '✅' : '❌';
-                $ssl = $result->getHasSSL() ? '🔒' : '🔓';
-                echo "$status $ssl";
-                
-                if ($result->getResponseTime()) {
-                    echo " ({$result->getResponseTime()}s)";
+                $subdomain = trim($subdomain);
+                if (empty($subdomain)) {
+                    continue;
                 }
+
+                $this->logger->logDebug("Checking subdomain: $subdomain");
                 
-                echo "\n";
-                
-                // تاخیر کوچک برای جلوگیری از فشار بیش از حد
-                usleep(100000); // 0.1 ثانیه
+                try {
+                    $result = $this->httpClient->check($subdomain);
+                    $logModel->addResult($result);
+                    $checkedCount++;
+
+                    $this->logger->logDebug("Subdomain $subdomain: " . 
+                        ($result->getStatus() ? 'ONLINE' : 'OFFLINE') . 
+                        ", SSL: " . ($result->getHasSSL() ? 'YES' : 'NO'));
+
+                } catch (\Exception $e) {
+                    $this->logger->logError("Error checking $subdomain: " . $e->getMessage());
+                }
             }
 
-            // ذخیره لاگ
-            echo "\n💾 در حال ذخیره لاگ...\n";
-            if (!$this->logModel->save()) {
-                throw new \Exception('خطا در ذخیره لاگ');
+            $this->logger->log("Successfully checked $checkedCount subdomains");
+
+            // ذخیره نتایج
+            $saveResult = $logModel->save();
+            if (!$saveResult) {
+                $error = "Failed to save log file";
+                $this->logger->logError($error);
+                $this->telegram->sendError($error);
+                return false;
             }
 
-            // ارسال به تلگرام
-            echo "📱 در حال ارسال گزارش به تلگرام...\n";
-            $summary = $this->logModel->getSummary();
-            
-            if ($this->telegram->send($summary)) {
-                echo "✅ گزارش با موفقیت ارسال شد\n";
-            } else {
-                echo "⚠️ خطا در ارسال گزارش به تلگرام\n";
+            $this->logger->log("Log file saved successfully");
+
+            // ارسال نوتیفیکیشن اگر ساب دامین آفلاین وجود دارد
+            $data = $logModel->getData();
+            if ($data['offline'] > 0) {
+                $this->telegram->send($logModel->getSummary());
             }
 
-            echo "\n✅ مانیتورینگ با موفقیت انجام شد\n";
+            $this->logger->log("Monitoring process completed successfully");
             return true;
 
         } catch (\Exception $e) {
-            echo "❌ خطا: " . $e->getMessage() . "\n";
-            $this->telegram->sendError($e->getMessage());
+            $error = "Critical error in monitoring process: " . $e->getMessage();
+            $this->logger->logError($error);
+            $this->telegram->sendError($error);
             return false;
         }
-    }
-
-    private function loadSubdomains(): array
-    {
-        $file = $this->config['paths']['subdomains'];
-        
-        if (!file_exists($file)) {
-            throw new \Exception("فایل لیست ساب‌دامین‌ها یافت نشد: $file");
-        }
-
-        $content = file_get_contents($file);
-        $lines = explode("\n", $content);
-        
-        $subdomains = [];
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if (!empty($line) && !str_starts_with($line, '#')) {
-                $subdomains[] = $line;
-            }
-        }
-
-        return $subdomains;
     }
 }
